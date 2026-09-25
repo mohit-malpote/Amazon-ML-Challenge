@@ -1,0 +1,33 @@
+# Datasets and large data files
+**/dataset/
+*.tsv
+*.csv
+*.parquet
+*.feather
+*.zip
+*.tar.gz
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.bin
+*.h5
+*.ckpt
+*.onnx
+*.pkl
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.venv/
+env/
+venv/
+
+# OS and IDE files
+__MACOSX/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
