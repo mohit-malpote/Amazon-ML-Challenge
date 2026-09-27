@@ -82,88 +82,136 @@ def main():
     # ---------------------------------------------------------
     # STEP 2: Load Test Datasets into Precomputed Memory Index
     # ---------------------------------------------------------
-    print("STEP 2: Loading and precomputing attributes for test entities...")
-    t0 = time.time()
+    import pickle
+    cache_path = os.path.join(output_dir, 'test_entity_cache.pkl')
     
-    # Load Source 1
-    s1_dict = {}
-    all_s1_ids = []
-    s1_file = os.path.join(test_dir, 'test_source1.tsv')
-    with open(s1_file, 'r', encoding='utf-8') as f:
-        next(f)
-        for line in f:
-            p = line.rstrip('\n').split('\t')
-            eid = p[0]
-            all_s1_ids.append(eid)
-            nm = p[1].lower() if len(p) > 1 and p[1] else ''
-            ad = p[2].lower() if len(p) > 2 and p[2] else ''
-            ct = p[3] if len(p) > 3 and p[3] else ''
-            s1_dict[eid] = (
-                nm, ad, ct,
-                get_first_token(nm),
-                clean_legal(nm),
-                get_leading_num(ad),
-                get_zip(ad)
-            )
-
-    print(f"   -> Loaded {len(s1_dict):,} S1 entities from {s1_file}.")
-
-    # Load Source 2 and Source 3 (Only required candidate entities)
-    cand_dict = {}
-    for src in ['test_source2.tsv', 'test_source3.tsv']:
-        src_path = os.path.join(test_dir, src)
-        loaded_from_src = 0
-        with open(src_path, 'r', encoding='utf-8') as f:
+    if os.path.exists(cache_path):
+        print(f"STEP 2: Loading cached precomputed entity index from {cache_path}...")
+        t0 = time.time()
+        with open(cache_path, 'rb') as f:
+            s1_dict, cand_dict, all_s1_ids = pickle.load(f)
+        del needed_cand_ids
+        gc.collect()
+        print(f"   -> Loaded {len(s1_dict):,} S1 and {len(cand_dict):,} candidate entities in {time.time()-t0:.2f}s.\n")
+    else:
+        print("STEP 2: Loading and precomputing attributes for test entities...")
+        t0 = time.time()
+        
+        # Load Source 1
+        s1_dict = {}
+        all_s1_ids = []
+        s1_file = os.path.join(test_dir, 'test_source1.tsv')
+        with open(s1_file, 'r', encoding='utf-8') as f:
             next(f)
             for line in f:
                 p = line.rstrip('\n').split('\t')
                 eid = p[0]
-                if eid in needed_cand_ids:
-                    nm = p[1].lower() if len(p) > 1 and p[1] else ''
-                    ad = p[2].lower() if len(p) > 2 and p[2] else ''
-                    ct = p[3] if len(p) > 3 and p[3] else ''
-                    cand_dict[eid] = (
-                        nm, ad, ct,
-                        get_first_token(nm),
-                        clean_legal(nm),
-                        get_leading_num(ad),
-                        get_zip(ad)
-                    )
-                    loaded_from_src += 1
-        print(f"   -> Loaded {loaded_from_src:,} referenced entities from {src}.")
+                all_s1_ids.append(eid)
+                nm = p[1] if len(p) > 1 and p[1] else ''
+                ad = p[2].lower() if len(p) > 2 and p[2] else ''
+                ct = p[3] if len(p) > 3 and p[3] else ''
+                nm_clean = clean_brand_name(nm).lower()
+                s1_dict[eid] = (
+                    nm_clean, ad, ct,
+                    get_first_token(nm),
+                    clean_legal(nm),
+                    get_leading_num(ad),
+                    get_zip(ad)
+                )
 
-    del needed_cand_ids
-    gc.collect()
-    print(f"   -> Total entity index ready in {time.time()-t0:.2f}s.\n")
+        print(f"   -> Loaded {len(s1_dict):,} S1 entities from {s1_file}.")
+
+        # Load Source 2 and Source 3 (Only required candidate entities)
+        cand_dict = {}
+        for src in ['test_source2.tsv', 'test_source3.tsv']:
+            src_path = os.path.join(test_dir, src)
+            loaded_from_src = 0
+            with open(src_path, 'r', encoding='utf-8') as f:
+                next(f)
+                for line in f:
+                    p = line.rstrip('\n').split('\t')
+                    eid = p[0]
+                    if eid in needed_cand_ids:
+                        nm = p[1] if len(p) > 1 and p[1] else ''
+                        ad = p[2].lower() if len(p) > 2 and p[2] else ''
+                        ct = p[3] if len(p) > 3 and p[3] else ''
+                        nm_clean = clean_brand_name(nm).lower()
+                        cand_dict[eid] = (
+                            nm_clean, ad, ct,
+                            get_first_token(nm),
+                            clean_legal(nm),
+                            get_leading_num(ad),
+                            get_zip(ad)
+                        )
+                        loaded_from_src += 1
+            print(f"   -> Loaded {loaded_from_src:,} referenced entities from {src}.")
+
+        del needed_cand_ids
+        gc.collect()
+        print(f"   -> Total entity index ready in {time.time()-t0:.2f}s.")
+        print(f"   -> Caching precomputed entity index to {cache_path}...")
+        t_cache = time.time()
+        with open(cache_path, 'wb') as f:
+            pickle.dump((s1_dict, cand_dict, all_s1_ids), f, protocol=4)
+        print(f"   -> Cached index written in {time.time()-t_cache:.2f}s.\n")
 
     # ---------------------------------------------------------
     # STEP 3: Load Models
     # ---------------------------------------------------------
-    print("STEP 3: Loading Stage 1 GBDT and Stage 2 GPU Semantic Inspector...")
+    print("STEP 3: Loading Stage 1 GBDT...")
     lgb_model = lgb.Booster(model_file=model_path)
-    semantic_inspector = SemanticInspector()
-    print("   -> Both models loaded successfully.\n")
+    print("   -> LightGBM model loaded successfully.\n")
 
     # ---------------------------------------------------------
     # STEP 4: Stream Candidate Pairs and Run Cascade Inference
     # ---------------------------------------------------------
     print("STEP 4: Processing candidates in streaming chunks of 50,000 S1 entities...")
     
-    # Open raw matches output file
-    with open(raw_matches_path, 'w', encoding='utf-8') as f_out:
-        f_out.write("id1\tid2\tscore\n")
+    # Check if raw_matches_path exists and has lines to resume from
+    resume_s1_count = 0
+    existing_match_count = 0
+    if os.path.exists(raw_matches_path):
+        last_s1 = None
+        with open(raw_matches_path, 'r', encoding='utf-8') as f:
+            header = f.readline()
+            for line in f:
+                existing_match_count += 1
+                last_s1 = line.partition('\t')[0]
+                
+        if last_s1:
+            with open(cands_path, 'r', encoding='utf-8') as f_cands:
+                next(f_cands) # header
+                for idx, line in enumerate(f_cands, 1):
+                    if line.partition('\t')[0] == last_s1:
+                        resume_s1_count = idx
+                        break
 
     CHUNK_S1_SIZE = 50000
-    chunk_idx = 0
+    if resume_s1_count > 0:
+        print(f"   -> RESUMING from S1 entity {resume_s1_count:,} / {total_s1_entities:,} ({existing_match_count:,} matches already on disk).")
+        chunk_idx = resume_s1_count // CHUNK_S1_SIZE
+        total_raw_matches = existing_match_count
+        initial_chunk_idx = chunk_idx
+    else:
+        with open(raw_matches_path, 'w', encoding='utf-8') as f_out:
+            f_out.write("id1\tid2\tscore\n")
+        chunk_idx = 0
+        total_raw_matches = 0
+        initial_chunk_idx = 0
+
     total_valid_pairs_processed = 0
     total_stage1_matches = 0
     total_stage2_matches = 0
-    total_raw_matches = 0
 
     inference_t0 = time.time()
 
     with open(cands_path, 'r', encoding='utf-8') as f_in:
         next(f_in) # header
+        if resume_s1_count > 0:
+            print(f"   -> Skipping first {resume_s1_count:,} already-processed candidate lines...")
+            for _ in range(resume_s1_count):
+                f_in.readline()
+            print(f"   -> Resumed file pointer successfully. Starting from Chunk {chunk_idx+1}...")
         
         while True:
             chunk_s1_pairs = []
@@ -220,16 +268,31 @@ def main():
             num2 = [p[3][5] for p in pairs_to_evaluate]
             z2 = [p[3][6] for p in pairs_to_evaluate]
 
-            # 3. Vectorized feature computation
+            # 3. Vectorized feature computation (23 features)
             feat_name_lev = [jellyfish.levenshtein_distance(a, b) for a, b in zip(n1, n2)]
+            feat_name_lev_r = [1.0 - (d / max(len(a), len(b))) if max(len(a), len(b)) > 0 else 0.0 for a, b, d in zip(n1, n2, feat_name_lev)]
             feat_name_jw = [jellyfish.jaro_winkler_similarity(a, b) for a, b in zip(n1, n2)]
             feat_name_tsr = [rapidfuzz.fuzz.token_set_ratio(a, b) for a, b in zip(n1, n2)]
             feat_addr_street = [rapidfuzz.fuzz.token_set_ratio(a, b) for a, b in zip(a1, a2)]
+            feat_addr_sort = [rapidfuzz.fuzz.token_sort_ratio(a, b) for a, b in zip(a1, a2)]
+            feat_addr_jw = [jellyfish.jaro_winkler_similarity(a, b) for a, b in zip(a1, a2)]
             feat_addr_zip = [1 if (x and y and x == y) else (0 if (x and y and x != y) else -1) for x, y in zip(z1, z2)]
             feat_postal_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(z1, z2)]
             feat_st_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(num1, num2)]
             feat_st_match = [1 if (x and y and x == y) else 0 for x, y in zip(num1, num2)]
+
+            clean_num1 = [n.lstrip('0') for n in num1]
+            clean_num2 = [n.lstrip('0') for n in num2]
+            feat_clean_st_match = [1 if (x and x == y) else 0 for x, y in zip(clean_num1, clean_num2)]
+            feat_clean_st_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(clean_num1, clean_num2)]
+
             feat_brand_first = [rapidfuzz.fuzz.ratio(x, y) / 100.0 if (x and y) else 0.5 for x, y in zip(f1, f2)]
+            feat_brand_first_exact = [1 if (x and x == y) else 0 for x, y in zip(f1, f2)]
+
+            ph1 = [jellyfish.metaphone(x) if x else "" for x in f1]
+            ph2 = [jellyfish.metaphone(y) if y else "" for y in f2]
+            feat_name_phone_m = [1 if (x and x == y) else 0 for x, y in zip(ph1, ph2)]
+
             feat_clean_legal = [1 if (x and x == y) else 0 for x, y in zip(cl1, cl2)]
             feat_name_len_r = [min(len(a), len(b)) / max(len(a), len(b)) if max(len(a), len(b)) > 0 else 0.0 for a, b in zip(n1, n2)]
             feat_addr_len_r = [min(len(a), len(b)) / max(len(a), len(b)) if max(len(a), len(b)) > 0 else 0.0 for a, b in zip(a1, a2)]
@@ -240,14 +303,21 @@ def main():
 
             X = np.column_stack([
                 feat_name_lev,
+                feat_name_lev_r,
                 feat_name_jw,
                 feat_name_tsr,
                 feat_addr_street,
+                feat_addr_sort,
+                feat_addr_jw,
                 feat_addr_zip,
                 feat_postal_mismatch,
                 feat_st_mismatch,
                 feat_st_match,
+                feat_clean_st_match,
+                feat_clean_st_mismatch,
                 feat_brand_first,
+                feat_brand_first_exact,
+                feat_name_phone_m,
                 feat_clean_legal,
                 feat_name_len_r,
                 feat_addr_len_r,
@@ -260,42 +330,25 @@ def main():
             # 4. Stage 1 Inference
             s1_preds = lgb_model.predict(X)
 
-            # 5. Cascade Decision Rules
+            # 5. Calibrated Threshold Decision & Precision Veto Rules
             chunk_matches = []
-            borderline_indices = []
+            MATCH_THRESHOLD = 0.40
 
             for i in range(n_pairs):
                 s1_s = s1_preds[i]
-                st_mis = feat_st_mismatch[i]
-                n_tsr = feat_name_tsr[i]
                 
-                # Hard address conflict disqualification: different building with low name similarity
-                if st_mis == 1 and n_tsr < 75:
+                # Rule 1: Hard Building/Plot Number Disqualification
+                if feat_clean_st_mismatch[i] == 1 and feat_name_tsr[i] < 75:
                     continue
                     
-                if s1_s <= 0.20:
+                # Rule 2: Brand Collision Disqualification (different brand at shared address/mall)
+                if feat_brand_first[i] < 0.35 and feat_name_tsr[i] < 50:
                     continue
-                elif s1_s >= 0.90:
+                    
+                if s1_s >= MATCH_THRESHOLD:
                     p = pairs_to_evaluate[i]
                     chunk_matches.append((p[0], p[1], float(s1_s)))
                     total_stage1_matches += 1
-                else:
-                    borderline_indices.append(i)
-
-            # 6. Stage 2 (Deep Semantic Inspector on GPU)
-            if borderline_indices:
-                pairs_s2 = [(n1[i], a1[i], n2[i], a2[i]) for i in borderline_indices]
-                s2_preds = semantic_inspector.predict(pairs_s2)
-                
-                for idx_in_borderline, orig_idx in enumerate(borderline_indices):
-                    s2_s = s2_preds[idx_in_borderline]
-                    brand_ratio = feat_brand_first[orig_idx]
-                    
-                    # Accept calibrated high-confidence semantic matches without brand collisions
-                    if s2_s >= 0.88 and brand_ratio >= 0.40:
-                        p = pairs_to_evaluate[orig_idx]
-                        chunk_matches.append((p[0], p[1], float(s2_s)))
-                        total_stage2_matches += 1
 
             total_raw_matches += len(chunk_matches)
 
@@ -309,14 +362,15 @@ def main():
             elapsed_tot = time.time() - inference_t0
             s1_processed = min(chunk_idx * CHUNK_S1_SIZE, total_s1_entities)
             pct = (s1_processed / total_s1_entities) * 100.0
-            rate = s1_processed / elapsed_tot if elapsed_tot > 0 else 1.0
+            s1_done_this_session = (chunk_idx - initial_chunk_idx) * CHUNK_S1_SIZE
+            rate = s1_done_this_session / elapsed_tot if elapsed_tot > 0 else 1.0
             eta_sec = (total_s1_entities - s1_processed) / rate if rate > 0 else 0.0
 
             print(f"   [Chunk {chunk_idx:2d} | {pct:5.1f}%] S1: {s1_processed:,}/{total_s1_entities:,} | "
                   f"Pairs: {n_pairs:,} | Chunk Matches: {len(chunk_matches):,} | "
                   f"Total Matches: {total_raw_matches:,} | ETA: {eta_sec/60:.1f}m")
 
-            del pairs_to_evaluate, X, s1_preds, chunk_matches, borderline_indices
+            del pairs_to_evaluate, X, s1_preds, chunk_matches
             del feat_name_lev, feat_name_jw, feat_name_tsr, feat_addr_street
             del n1, n2, a1, a2, f1, f2, cl1, cl2, num1, num2, z1, z2
             gc.collect()

@@ -6,6 +6,9 @@
 *.feather
 *.zip
 *.tar.gz
+*.bak*
+data/
+
 
 # Model weights and checkpoints
 *.pt

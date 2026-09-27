@@ -14,16 +14,78 @@ import json
 # ==========================================
 import re
 
+import unicodedata
+
+# Comprehensive Brahmic Romanizer mapping covering all Indic scripts (Hindi, Bengali, Odia, Gujarati, Marathi, Tamil, Telugu, Kannada, Malayalam, Gurmukhi)
+INDIC_VOWELS = {
+    'A': 'a', 'AA': 'aa', 'I': 'i', 'II': 'ee', 'U': 'u', 'UU': 'oo',
+    'VOCALIC R': 'ri', 'VOCALIC RR': 'ri', 'E': 'e', 'AI': 'ai', 'O': 'o', 'AU': 'au',
+    'CANDRA E': 'e', 'CANDRA O': 'o', 'SHORT E': 'e', 'SHORT O': 'o'
+}
+
+INDIC_CONSONANTS = {
+    'KA': 'k', 'KHA': 'kh', 'GA': 'g', 'GHA': 'gh', 'NGA': 'ng',
+    'CA': 'ch', 'CHA': 'chh', 'JA': 'j', 'JHA': 'jh', 'NYA': 'ny',
+    'TTA': 't', 'TTHA': 'th', 'DDA': 'd', 'DDHA': 'dh', 'NNA': 'n',
+    'TA': 't', 'THA': 'th', 'DA': 'd', 'DHA': 'dh', 'NA': 'n',
+    'PA': 'p', 'PHA': 'ph', 'BA': 'b', 'BHA': 'bh', 'MA': 'm',
+    'YA': 'y', 'RA': 'r', 'LA': 'l', 'LLA': 'l', 'VA': 'v', 'WA': 'w',
+    'SHA': 'sh', 'SSA': 'sh', 'SA': 's', 'HA': 'h'
+}
+
+def romanize_indic(text):
+    if not text:
+        return ""
+    out = []
+    for ch in text:
+        if ord(ch) < 128:
+            out.append(ch)
+            continue
+        try:
+            uname = unicodedata.name(ch)
+        except ValueError:
+            continue
+        if any(uname.startswith(script) for script in ['DEVANAGARI', 'BENGALI', 'GURMUKHI', 'GUJARATI', 'ORIYA', 'TAMIL', 'TELUGU', 'KANNADA', 'MALAYALAM']):
+            if 'VIRAMA' in uname:
+                continue
+            if 'ANUSVARA' in uname or 'CANDRABINDU' in uname:
+                out.append('n')
+                continue
+            if 'VOWEL SIGN ' in uname:
+                v = uname.split('VOWEL SIGN ')[1].strip()
+                if v in INDIC_VOWELS:
+                    out.append(INDIC_VOWELS[v])
+                    continue
+            if 'LETTER ' in uname:
+                l = uname.split('LETTER ')[1].strip()
+                if l in INDIC_VOWELS:
+                    out.append(INDIC_VOWELS[l])
+                    continue
+                if l in INDIC_CONSONANTS:
+                    out.append(INDIC_CONSONANTS[l])
+                    continue
+            out.append(' ')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
 FEATURE_COLUMNS = [
     'name_levenshtein',
+    'name_levenshtein_ratio',
     'name_jaro_winkler',
     'name_token_set_ratio',
     'address_street_match',
+    'address_token_sort_ratio',
+    'address_jaro_winkler',
     'address_zip_match',
     'postal_code_mismatch',
     'street_number_mismatch',
     'street_number_match',
+    'clean_street_num_match',
+    'clean_street_num_mismatch',
     'brand_first_token_ratio',
+    'brand_first_token_exact',
+    'name_phonetic_match',
     'clean_legal_name_match',
     'name_length_ratio',
     'address_length_ratio',
@@ -33,23 +95,58 @@ FEATURE_COLUMNS = [
     'country_mismatch'
 ]
 
-legal_suffixes_regex = re.compile(r'\b(pvt\s+ltd|private\s+limited|llc|inc|corp|corporation|co|company|ltd|limited|llp|gmbh|sarl|sa)\b', re.IGNORECASE)
+# Multilingual legal suffixes (covering US, India, France, and international forms)
+legal_suffixes_regex = re.compile(
+    r'\b(pvt\s+ltd|private\s+limited|llc|inc|corp|corporation|co|company|ltd|limited|llp|gmbh|sarl|sas|sasu|eurl|sci|snc|sa|ei|fils|societe|ste|association|ets|etablissements)\b',
+    re.IGNORECASE
+)
 punct_regex = re.compile(r'[^\w\s]')
-noise_tokens = {'the', 'a', 'an', 'of', 'in', 'and'}
+noise_tokens = {'the', 'a', 'an', 'of', 'in', 'and', 'le', 'la', 'les', 'de', 'du', 'des'}
 bracket_regex = re.compile(r'\[.*?\]')
-prefix_noise_regex = re.compile(r'^\s*\b(shri|sri|sree|m/s|smt|dr|mr|mrs|partners|the|a|an|of)\b\s*', re.IGNORECASE)
-leading_num_pattern = re.compile(r'^\s*(\d+)')
+prefix_noise_regex = re.compile(r'^\s*\b(shri|sri|sree|m/s|smt|dr|mr|mrs|partners|the|a|an|of|ste|societe|ets|cie|cabinet|atelier)\b\s*', re.IGNORECASE)
+symbol_noise_regex = re.compile(r'^[^\w]+|[^\w]+$')
+domain_regex = re.compile(r'\.(?:com|in|org|net|co\.in|fr|io)\b', re.IGNORECASE)
+phone_regex = re.compile(r'[\s\-]+\d{10}\b')
+
+# Smart Building/Unit Number extraction patterns across US, India, France
+bldg_prefix_pattern = re.compile(
+    r'\b(?:plot\s*no\.?|house\s*no\.?|h\.?\s*no\.?|flat\s*no\.?|door\s*no\.?|shop\s*no\.?|no\.?|kh\.?\s*no\.?|unit|suite|ste|apt|bldg|building|room|rn|hn)\s*[:#\-\/]?\s*([0-9]+[a-zA-Z]?)\b',
+    re.IGNORECASE
+)
+bldg_adj_pattern = re.compile(
+    r'\b(\d+)\s*(?:bis|ter|quater)?\s*(?:st|street|ave|avenue|rd|road|lane|dr|drive|ter|terrace|rue|bd|boulevard|blvd|chemin|impasse|allee|place|pl|cours|route|rte|quai|passage|square)\b',
+    re.IGNORECASE
+)
+bldg_post_pattern = re.compile(
+    r'\b(?:st|street|ave|avenue|rd|road|lane|dr|drive|ter|terrace|rue|bd|boulevard|blvd|chemin|impasse|allee|place|pl|cours|route|rte|quai|passage|square)\s+(\d+)\b',
+    re.IGNORECASE
+)
+leading_num_pattern = re.compile(r'^\s*(\d+)\b')
 zip_pattern = re.compile(r'\b\d{5,6}\b')
 
 def clean_brand_name(name):
-    s = bracket_regex.sub(' ', name)
+    if not name or not isinstance(name, str):
+        return ""
+    rom = romanize_indic(name)
+    s = unicodedata.normalize('NFKD', rom).encode('ascii', 'ignore').decode('utf-8')
+    s = s.replace('&', ' and ')
+    s = domain_regex.sub('', s)
+    s = phone_regex.sub('', s)
+    s = bracket_regex.sub(' ', s)
+    s = symbol_noise_regex.sub(' ', s)
     s = prefix_noise_regex.sub(' ', s)
     s = punct_regex.sub(' ', s)
     s = legal_suffixes_regex.sub(' ', s)
     return ' '.join(s.split())
 
 def clean_legal(name):
-    s = bracket_regex.sub(' ', name)
+    if not name or not isinstance(name, str):
+        return ""
+    rom = romanize_indic(name)
+    s = unicodedata.normalize('NFKD', rom).encode('ascii', 'ignore').decode('utf-8')
+    s = domain_regex.sub('', s)
+    s = bracket_regex.sub(' ', s)
+    s = symbol_noise_regex.sub(' ', s)
     s = punct_regex.sub(' ', s.lower())
     s = legal_suffixes_regex.sub(' ', s)
     s = prefix_noise_regex.sub(' ', s)
@@ -61,8 +158,39 @@ def get_first_token(name):
     return tokens[0] if tokens else ""
 
 def get_leading_num(addr):
-    m = leading_num_pattern.match(addr)
-    return m.group(1) if m else ""
+    if not addr or not isinstance(addr, str):
+        return ""
+    ad = addr.lower()
+    
+    # 1. Prefix pattern (Plot No, H.No, Door No, Flat No, etc.)
+    m = bldg_prefix_pattern.search(ad)
+    if m:
+        num = m.group(1).lstrip('0')
+        if num and not (len(num) in [5, 6] and num.isdigit()):
+            return num
+            
+    # 2. Street adjacency pattern (175 Boulevard, 5 bis Rue, etc.)
+    m = bldg_adj_pattern.search(ad)
+    if m:
+        num = m.group(1).lstrip('0')
+        if num and not (len(num) in [5, 6] and num.isdigit()):
+            return num
+
+    # 3. Post street pattern (Rue 20, Avenue 329, etc.)
+    m = bldg_post_pattern.search(ad)
+    if m:
+        num = m.group(1).lstrip('0')
+        if num and not (len(num) in [5, 6] and num.isdigit()):
+            return num
+            
+    # 4. Leading number fallback
+    m = leading_num_pattern.search(ad)
+    if m:
+        num = m.group(1).lstrip('0')
+        if num and not (len(num) in [5, 6] and num.isdigit()):
+            return num
+            
+    return ""
 
 def get_zip(addr):
     m = zip_pattern.search(addr)
@@ -75,14 +203,17 @@ def length_ratio(s1, s2):
 
 def compute_features_fast(df):
     print(f"Vectorizing feature computation for {len(df):,} pairs...")
-    n1 = df['name1'].fillna("").astype(str).str.lower().tolist()
-    n2 = df['name2'].fillna("").astype(str).str.lower().tolist()
+    n1_raw = df['name1'].fillna("").astype(str).tolist()
+    n2_raw = df['name2'].fillna("").astype(str).tolist()
+    n1 = [clean_brand_name(x).lower() for x in n1_raw]
+    n2 = [clean_brand_name(x).lower() for x in n2_raw]
     a1 = df['addr1'].fillna("").astype(str).str.lower().tolist()
     a2 = df['addr2'].fillna("").astype(str).str.lower().tolist()
     
     # 1. Name Similarities
-    print(" 1/8 Computing Name String Similarities (Levenshtein, JW, TSR)...")
+    print(" 1/8 Computing Name String Similarities (Levenshtein, Ratio, JW, TSR)...")
     name_lev = [jellyfish.levenshtein_distance(a, b) for a, b in zip(n1, n2)]
+    name_lev_r = [1.0 - (d / max(len(a), len(b))) if max(len(a), len(b)) > 0 else 0.0 for a, b, d in zip(n1, n2, name_lev)]
     name_jw = [jellyfish.jaro_winkler_similarity(a, b) for a, b in zip(n1, n2)]
     name_tsr = [rapidfuzz.fuzz.token_set_ratio(a, b) for a, b in zip(n1, n2)]
     
@@ -93,24 +224,35 @@ def compute_features_fast(df):
     addr_zip = [1 if (x and y and x == y) else (0 if (x and y and x != y) else -1) for x, y in zip(z1, z2)]
     postal_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(z1, z2)]
     
-    print(" 3/8 Computing Address Street Match...")
+    print(" 3/8 Computing Address Street Match, Sort Ratio & JW...")
     addr_street = [rapidfuzz.fuzz.token_set_ratio(a, b) for a, b in zip(a1, a2)]
+    addr_sort = [rapidfuzz.fuzz.token_sort_ratio(a, b) for a, b in zip(a1, a2)]
+    addr_jw = [jellyfish.jaro_winkler_similarity(a, b) for a, b in zip(a1, a2)]
     
-    # 3. Leading Street Number Hard Disqualifiers
+    # 3. Leading Street Number Hard Disqualifiers & Clean Numbers
     print(" 4/8 Computing Street Number Match & Mismatch...")
     num1 = [get_leading_num(a) for a in a1]
     num2 = [get_leading_num(a) for a in a2]
     st_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(num1, num2)]
     st_match = [1 if (x and y and x == y) else 0 for x, y in zip(num1, num2)]
+    clean_num1 = [n.lstrip('0') for n in num1]
+    clean_num2 = [n.lstrip('0') for n in num2]
+    clean_st_match = [1 if (x and x == y) else 0 for x, y in zip(clean_num1, clean_num2)]
+    clean_st_mismatch = [1 if (x and y and x != y) else 0 for x, y in zip(clean_num1, clean_num2)]
     
     # 4. Brand Disambiguation & Clean Legal Match
-    print(" 5/8 Computing Brand First Token Ratio & Clean Legal Match...")
-    f1 = [get_first_token(n) for n in n1]
-    f2 = [get_first_token(n) for n in n2]
+    print(" 5/8 Computing Brand First Token Ratio, Phonetic & Clean Legal Match...")
+    f1 = [get_first_token(n) for n in n1_raw]
+    f2 = [get_first_token(n) for n in n2_raw]
     brand_first = [rapidfuzz.fuzz.ratio(x, y) / 100.0 if (x and y) else 0.5 for x, y in zip(f1, f2)]
+    brand_first_exact = [1 if (x and x == y) else 0 for x, y in zip(f1, f2)]
     
-    clean1 = [clean_legal(n) for n in n1]
-    clean2 = [clean_legal(n) for n in n2]
+    ph1 = [jellyfish.metaphone(x) if x else "" for x in f1]
+    ph2 = [jellyfish.metaphone(y) if y else "" for y in f2]
+    name_phone_m = [1 if (x and x == y) else 0 for x, y in zip(ph1, ph2)]
+    
+    clean1 = [clean_legal(n) for n in n1_raw]
+    clean2 = [clean_legal(n) for n in n2_raw]
     clean_legal_m = [1 if (c1_ and c1_ == c2_) else 0 for c1_, c2_ in zip(clean1, clean2)]
     
     # 5. Length Ratios & Exact Match
@@ -137,14 +279,21 @@ def compute_features_fast(df):
         country_mismatch = [0] * len(df)
         
     df['name_levenshtein'] = name_lev
+    df['name_levenshtein_ratio'] = name_lev_r
     df['name_jaro_winkler'] = name_jw
     df['name_token_set_ratio'] = name_tsr
     df['address_street_match'] = addr_street
+    df['address_token_sort_ratio'] = addr_sort
+    df['address_jaro_winkler'] = addr_jw
     df['address_zip_match'] = addr_zip
     df['postal_code_mismatch'] = postal_mismatch
     df['street_number_mismatch'] = st_mismatch
     df['street_number_match'] = st_match
+    df['clean_street_num_match'] = clean_st_match
+    df['clean_street_num_mismatch'] = clean_st_mismatch
     df['brand_first_token_ratio'] = brand_first
+    df['brand_first_token_exact'] = brand_first_exact
+    df['name_phonetic_match'] = name_phone_m
     df['clean_legal_name_match'] = clean_legal_m
     df['name_length_ratio'] = name_len_r
     df['address_length_ratio'] = addr_len_r

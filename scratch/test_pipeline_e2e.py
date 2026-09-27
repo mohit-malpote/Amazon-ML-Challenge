@@ -1,5 +1,6 @@
 import sys, os, time, gc
-sys.path.insert(0, 'src')
+base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(base_dir, 'src'))
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -15,7 +16,7 @@ print("Testing End-to-End Pipeline on first 1,000 S1 entities...")
 
 # 1. Load test S1 first 1000
 test_s1_dict = {}
-with open('student_resource/dataset/test/test_source1.tsv', 'r', encoding='utf-8') as f:
+with open(os.path.join(base_dir, 'student_resource', 'dataset', 'test', 'test_source1.tsv'), 'r', encoding='utf-8') as f:
     next(f)
     for _ in range(1000):
         line = f.readline()
@@ -36,7 +37,11 @@ print(f"Loaded {len(test_s1_dict)} S1 entities.")
 # Read candidate pairs for first 1000 S1 entities
 cand_ids_needed = set()
 s1_cand_pairs = []
-with open('output/candidate_pairs_test.tsv', 'r', encoding='utf-8') as f:
+cand_file = os.path.join(base_dir, 'output', 'candidate_pairs_test.tsv')
+if not os.path.exists(cand_file):
+    cand_file = os.path.join(base_dir, 'output', 'candidate_pairs.tsv')
+
+with open(cand_file, 'r', encoding='utf-8') as f:
     next(f)
     for _ in range(1000):
         line = f.readline()
@@ -52,7 +57,7 @@ print(f"Found {sum(len(c) for _, c in s1_cand_pairs):,} candidate pairs referenc
 # Load only the needed candidate entities from test_source2 and test_source3
 cand_dict = {}
 for src in ['test_source2.tsv', 'test_source3.tsv']:
-    with open(f'student_resource/dataset/test/{src}', 'r', encoding='utf-8') as f:
+    with open(os.path.join(base_dir, 'student_resource', 'dataset', 'test', src), 'r', encoding='utf-8') as f:
         next(f)
         for line in f:
             p = line.rstrip('\n').split('\t')
@@ -120,7 +125,7 @@ feat_dict = {
 X = pd.DataFrame(feat_dict)[FEATURE_COLUMNS]
 
 # LightGBM inference
-model = lgb.Booster(model_file='output/stage1_lgb_model.txt')
+model = lgb.Booster(model_file=os.path.join(base_dir, 'output', 'stage1_lgb_model.txt'))
 s1_scores = model.predict(X)
 
 # Decision logic
